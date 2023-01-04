@@ -50,6 +50,8 @@ typedef struct server_t {
 };
 
 #define HTTP_VERSION_LEN 10
+#define INITIAL_LINE_LEN 50
+
 #define NOT_FOUND "404 Not Found"
 #define OK "200 OK"
 
@@ -62,6 +64,7 @@ enum file_type_t {
 struct sent_file_t {
     enum file_type_t file_type;
     int fd;
+    size_t size;
 };
 
 #endif /* AWS_H_ */
