@@ -34,7 +34,7 @@ typedef struct server_t {
 	int listenfd;
 	int epollfd;
 	http_parser request_parser;
-} server;
+} server_t;
 
 #define HTTP_SETTINGS_INIT() { \
 	/* on_message_begin */ 0, \
@@ -47,6 +47,21 @@ typedef struct server_t {
 	/* on_body */ 0, \
 	/* on_headers_complete */ 0, \
 	/* on_message_complete */ 0 \
+};
+
+#define HTTP_VERSION_LEN 10
+#define NOT_FOUND "404 Not Found"
+#define OK "200 OK"
+
+enum file_type_t {
+    NO_FILE,
+    STATIC_FILE,
+    DYNAMIC_FILE
+};
+
+struct sent_file_t {
+    enum file_type_t file_type;
+    int fd;
 };
 
 #endif /* AWS_H_ */

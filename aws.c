@@ -12,11 +12,13 @@
 #include <libaio.h>
 #include <fcntl.h>
 #include <string.h>
+#include <sys/sendfile.h>
 
 #include "aws.h"
 
 struct server_t server;
 static char request_path[BUFSIZ];
+static char http_version[HTTP_VERSION_LEN];
 
 static int on_path_cb(http_parser *p, const char *buf, size_t len)
 {
@@ -28,32 +30,64 @@ static int on_path_cb(http_parser *p, const char *buf, size_t len)
 
 static http_parser_settings settings_on_path = HTTP_SETTINGS_INIT()
 
-static char *get_response(char *request_path) {
+static int check_path(char *request_path) {
+	/* Check to see if the path is valid */
 	if (!strcmp(request_path, "/") || !strlen(request_path)) {
-        char *error = "HTTP 404 Not Found\n";
-		memcpy(request_path, error, strlen(error));
+		return -1;
     }
 
-	return request_path;
+	/* Check if the file exists */
+	int fd = -1;
+	struct stat file_info;
+	if (!stat(request_path + 1, &file_info)) {
+		fd = open(request_path + 1, O_RDONLY);
+	}
+
+	return fd;
 }
 
 /*
- * Copy the response into the send buffer
+ * Copy the http response into the send buffer
+ * and return the file that should be handled (if it exists)
  */
-static void set_response(struct connection *conn)
+static struct sent_file_t set_response(struct connection *conn)
 {
 	/* Clear buffers */
 	memset(conn->recv_buffer, 0, BUFSIZ);
 	memset(conn->send_buffer, 0, BUFSIZ);
 
-	char *response = get_response(request_path);
-	printf("RESPONSE: %s\n", response);
+	/* Get http version */
+	sprintf(http_version, "HTTP/%hu.%hu", server.request_parser.http_major,
+										  server.request_parser.http_minor);
+
+	/* File descriptor or error (< 0) */
+	int response = check_path(request_path);
+
+	struct sent_file_t sent_file = {.file_type = NO_FILE, .fd = response};
     
-	conn->send_len = strlen(response);
-	memcpy(conn->send_buffer, response, conn->send_len);
+	if (response < 0) {
+		char error[BUFSIZ];
+		sprintf(error, "%s %s\r\n\r\n", http_version, NOT_FOUND);
+		conn->send_len = strlen(error);
+		memcpy(conn->send_buffer, error, strlen(error));
+	} else {
+		char success[BUFSIZ];
+		sprintf(success, "%s %s\r\n\r\n", http_version, OK);
+		conn->send_len = strlen(success);
+		memcpy(conn->send_buffer, success, strlen(success));
+
+		if (strstr(request_path, AWS_ABS_STATIC_FOLDER)) {
+			sent_file.file_type = STATIC_FILE;
+		} else {
+			sent_file.file_type = DYNAMIC_FILE;
+		}
+		//sent_file.file_type = STATIC_FILE;
+	}
 
 	/* Clear request path */
 	memset(request_path, 0, BUFSIZ);
+
+	return sent_file;
 }
 
 /*
@@ -127,6 +161,9 @@ static enum connection_state send_message(struct connection *conn)
 		goto remove_connection;
 	}
 
+	/* Analize request */
+	struct sent_file_t sent_file = set_response(conn);
+
 	bytes_sent = send(conn->sockfd, conn->send_buffer, conn->send_len, 0);
 	if (bytes_sent < 0) {		/* error in communication */
 		dlog(LOG_ERR, "Error in communication to %s\n", abuffer);
@@ -139,7 +176,23 @@ static enum connection_state send_message(struct connection *conn)
 
 	dlog(LOG_DEBUG, "Sending message to %s\n", abuffer);
 
-	printf("Message sent: %s--\n", conn->send_buffer);
+	printf("Message sent: %s\n", conn->send_buffer);
+
+	/* Send file if necessary */
+	switch (sent_file.file_type) {
+		case NO_FILE: {
+			break;
+		}
+		case STATIC_FILE: {
+			printf("Static file\n");
+			sendfile(conn->sockfd, sent_file.fd, SEEK_SET, BUFSIZ);
+			break;
+		}
+		case DYNAMIC_FILE: {
+			printf("Dynamic file\n");
+			break;
+		}
+	}
 
 	/* all done - remove out notification */
 	rc = w_epoll_update_ptr_in(server.epollfd, conn->sockfd, conn);
@@ -171,8 +224,6 @@ static void handle_client_request(struct connection *conn)
 	ret_state = receive_message(conn);
 	if (ret_state == STATE_CONNECTION_CLOSED)
 		return;
-
-	set_response(conn);
 
 	/* add socket to epoll for out events */
 	rc = w_epoll_update_ptr_inout(server.epollfd, conn->sockfd, conn);
