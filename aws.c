@@ -222,7 +222,6 @@ static enum connection_state send_message(struct connection *conn)
 											sent_file.size - conn->sent_bytes);
 			
 			sent_file.offset = (void *)conn->sent_bytes;
-			dlog(LOG_DEBUG, "Offset: %p\nSent bytes: %lu\n", sent_file.offset, conn->sent_bytes);
 
 			if (conn->sent_bytes < sent_file.size) {
 				dlog(LOG_DEBUG, "The file was not written completely\n");
@@ -244,7 +243,9 @@ static enum connection_state send_message(struct connection *conn)
 	rc = w_epoll_update_ptr_in(server.epollfd, conn->sockfd, conn);
 	DIE(rc < 0, "w_epoll_update_ptr_in");
 
-	// conn->state = STATE_DATA_SENT;
+	conn->state = STATE_DATA_SENT;
+
+	close(sent_file.fd);
 
 	// return STATE_DATA_SENT;
 
