@@ -34,19 +34,27 @@ typedef struct server_t {
 	int listenfd;
 	int epollfd;
 	http_parser request_parser;
+	int can_send;
 } server_t;
 
 #define HTTP_SETTINGS_INIT() { \
-	/* on_message_begin */ 0, \
-	/* on_header_field */ 0, \
-	/* on_header_value */ 0, \
-	/* on_path */ on_path_cb, \
-	/* on_url */ 0, \
-	/* on_fragment */ 0, \
- 	/* on_query_string */ 0, \
-	/* on_body */ 0, \
-	/* on_headers_complete */ 0, \
-	/* on_message_complete */ 0 \
+  .on_message_begin = 0, \
+  .on_path = on_path_cb, \
+  .on_query_string = 0, \
+  .on_url = 0, \
+  .on_fragment = 0, \
+  .on_header_field = 0, \
+  .on_header_value = 0, \
+  .on_headers_complete = on_headers_complete_cb, \
+  .on_body = 0, \
+  .on_message_complete = 0 \
+};
+
+#define SENT_FILE_INIT() {\
+		.file_type = NO_FILE, \
+		.fd = response,	\
+		.size = 0, \
+		.offset = SEEK_SET	\
 };
 
 #define HTTP_VERSION_LEN 10
@@ -65,6 +73,7 @@ struct sent_file_t {
     enum file_type_t file_type;
     int fd;
     size_t size;
+	off_t offset;
 };
 
 #endif /* AWS_H_ */

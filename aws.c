@@ -26,6 +26,15 @@ static int on_path_cb(http_parser *p, const char *buf, size_t len)
 	memcpy(request_path, buf, len);
 
 	dlog(LOG_DEBUG, "REQUEST: %s\n", request_path);
+	// server.can_send = 1;
+	return 0;
+}
+
+static int on_headers_complete_cb(http_parser *p)
+{
+	assert(p == &server.request_parser);
+	dlog(LOG_DEBUG, "SERVER CAN SEND TO: %s\n", request_path);
+	server.can_send = 1;
 
 	return 0;
 }
@@ -65,7 +74,7 @@ static struct sent_file_t set_response(struct connection *conn)
 	/* File descriptor or error (< 0) */
 	int response = check_path(request_path);
 
-	struct sent_file_t sent_file = {.file_type = NO_FILE, .fd = response, .size = 0};
+	struct sent_file_t sent_file = SENT_FILE_INIT()
     
 	char initial_line[INITIAL_LINE_LEN];
 	
@@ -78,24 +87,27 @@ static struct sent_file_t set_response(struct connection *conn)
 		conn->send_len = strlen(initial_line);
 		memcpy(conn->send_buffer, initial_line, strlen(initial_line));
 
-		// if (strstr(request_path, AWS_REL_STATIC_FOLDER)) {
-		// 	sent_file.file_type = STATIC_FILE;
-		// } else {
-		// 	sent_file.file_type = DYNAMIC_FILE;
-		// }
+		/* Get file type: static/dynamic */
+		// sent_file.file_type = strstr(request_path, AWS_REL_STATIC_FOLDER) ? 
+		// 						STATIC_FILE : DYNAMIC_FILE;
 		sent_file.file_type = STATIC_FILE;
+
 		char message[BUFSIZ];
+
+		/* Get file size */
 		struct stat file_info;
 		fstat(sent_file.fd, &file_info);
 		sent_file.size = file_info.st_size;
+
+		/* Put header */
 		sprintf(message, "%sContent-Length: %lu\r\n"
-						"Connection: close\r\n\r\n", initial_line, sent_file.size);
+						 "Connection: close\r\n\r\n", initial_line, sent_file.size);
 		conn->send_len = strlen(message);
 		memcpy(conn->send_buffer, message, strlen(message));
 	}
 
 	/* Clear request path */
-	//memset(request_path, 0, BUFSIZ);
+	// memset(request_path, 0, BUFSIZ);
 
 	return sent_file;
 }
@@ -107,8 +119,6 @@ static struct sent_file_t set_response(struct connection *conn)
 
 static enum connection_state receive_message(struct connection *conn)
 {
-    size_t bytes_parsed;
-
 	ssize_t bytes_recv;
 	int rc;
 	char abuffer[64];
@@ -119,9 +129,12 @@ static enum connection_state receive_message(struct connection *conn)
 		goto remove_connection;
 	}
 
-	bytes_recv = recv(conn->sockfd, conn->recv_buffer, BUFSIZ, 0);
+	char buffer[BUFSIZ];
+	
+	bytes_recv = recv(conn->sockfd, buffer, BUFSIZ, 0);
+	
+	strncat(conn->recv_buffer, buffer, bytes_recv);
 
-	dlog(LOG_DEBUG, "Received message: %s\n", conn->recv_buffer);
 	if (bytes_recv < 0) {		/* error in communication */
 		dlog(LOG_ERR, "Error in communication from: %s\n", abuffer);
 		goto remove_connection;
@@ -131,17 +144,10 @@ static enum connection_state receive_message(struct connection *conn)
 		goto remove_connection;
 	}
 
-	/* Set up http parser */
-	http_parser_init(&server.request_parser, HTTP_REQUEST);
+	conn->recv_len += bytes_recv;
 
-    bytes_parsed = http_parser_execute(&server.request_parser,
-									   &settings_on_path,
-									   conn->recv_buffer, bytes_recv);
+	dlog(LOG_DEBUG, "Received message: %s\n", conn->recv_buffer);
 
-	printf("Parsed simple HTTP request (bytes: %lu), path: %s\n", bytes_parsed, request_path);
-	dlog(LOG_DEBUG, "Received message from: %s\n", abuffer);
-
-	conn->recv_len = bytes_recv;
 	conn->state = STATE_DATA_RECEIVED;
 
 	return STATE_DATA_RECEIVED;
@@ -187,8 +193,6 @@ static enum connection_state send_message(struct connection *conn)
 	}
 
 	dlog(LOG_DEBUG, "Sending message to %s\n", abuffer);
-
-	printf("Message sent: %s\n", conn->send_buffer);
 	dlog(LOG_DEBUG, "Message sent: %s\n", conn->send_buffer);
 
 	/* Send file if necessary */
@@ -197,10 +201,17 @@ static enum connection_state send_message(struct connection *conn)
 			break;
 		}
 		case STATIC_FILE: {
-			printf("Static file\n");
 			dlog(LOG_DEBUG, "STATIC FILE\n");
 
-			sendfile(conn->sockfd, sent_file.fd, SEEK_SET, sent_file.size);
+			conn->sent_bytes += sendfile(conn->sockfd, sent_file.fd, NULL,
+											sent_file.size - sent_file.offset);
+
+			if (conn->sent_bytes != sent_file.size) {
+				dlog(LOG_DEBUG, "The file was not written completely\n");
+				conn->state = STATE_DATA_IS_BEING_SENT;
+				// return STATE_DATA_IS_BEING_SENT;
+			}
+			dlog(LOG_DEBUG, "DONE: %lu bytes written\n", conn->sent_bytes);
 			break;
 		}
 		case DYNAMIC_FILE: {
@@ -239,10 +250,33 @@ static void handle_client_request(struct connection *conn)
 	ret_state = receive_message(conn);
 	if (ret_state == STATE_CONNECTION_CLOSED)
 		return;
+	
+	// if (ret_state == STATE_DATA_IS_BEING_RECEIVED) {
+	// 	rc = w_epoll_update_ptr_in(server.epollfd, conn->sockfd, conn);
+	// 	DIE(rc < 0, "w_epoll_add_ptr_in");
+	// 	return;
+	// }
+	ssize_t bytes_recv = conn->recv_len;
 
-	/* add socket to epoll for out events */
-	rc = w_epoll_update_ptr_inout(server.epollfd, conn->sockfd, conn);
-	DIE(rc < 0, "w_epoll_add_ptr_inout");
+	/* Set up http parser */
+	size_t bytes_parsed;
+	http_parser_init(&server.request_parser, HTTP_REQUEST);
+
+    bytes_parsed = http_parser_execute(&server.request_parser,
+									   &settings_on_path,
+									   conn->recv_buffer, bytes_recv);
+	
+	if (!server.can_send) {
+		return;
+	}
+
+	/* Make socket output-only */
+	rc = w_epoll_update_ptr_out(server.epollfd, conn->sockfd, conn);
+	DIE(rc < 0, "w_epoll_update_ptr_out");
+
+	// /* add socket to epoll for out events */
+	// rc = w_epoll_update_ptr_inout(server.epollfd, conn->sockfd, conn);
+	// DIE(rc < 0, "w_epoll_add_ptr_inout");
 }
 
 int main(void)

@@ -14,12 +14,17 @@ struct connection *connection_create(int sockfd)
 
 	conn->sockfd = sockfd;
 
-    /* Make the socket non blocking */
+	/* Make the socket non blocking */
     int flags = fcntl(conn->sockfd, F_GETFL, 0);
     fcntl(conn->sockfd, F_SETFL, flags | O_NONBLOCK);
 
 	memset(conn->recv_buffer, 0, BUFSIZ);
 	memset(conn->send_buffer, 0, BUFSIZ);
+
+	conn->recv_len = 0;
+	conn->send_len = 0;
+	conn->sent_bytes = 0;
+	conn->received_bytes = 0;
 
 	return conn;
 }
