@@ -27,15 +27,6 @@ extern "C" {
 #include "lin/sock_util.h"
 #include "lin/w_epoll.h"
 #include "http-parser/http_parser.h"
-#include "connexion_utils.h"
-
-typedef struct server_t {
-	struct connection *connexions;
-	int listenfd;
-	int epollfd;
-	http_parser request_parser;
-	int can_send;
-} server_t;
 
 #define HTTP_SETTINGS_INIT() { \
   .on_message_begin = 0, \
@@ -73,7 +64,14 @@ struct sent_file_t {
     enum file_type_t file_type;
     int fd;
     size_t size;
-	off_t offset;
+	  off_t *offset;
 };
+
+typedef struct server_t {
+	int listenfd;
+	int epollfd;
+	http_parser request_parser;
+	int can_send;
+} server_t;
 
 #endif /* AWS_H_ */

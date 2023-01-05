@@ -15,6 +15,7 @@
 #include <sys/sendfile.h>
 
 #include "aws.h"
+#include "connexion_utils.h"
 
 struct server_t server;
 static char request_path[BUFSIZ];
@@ -25,8 +26,6 @@ static int on_path_cb(http_parser *p, const char *buf, size_t len)
 	assert(p == &server.request_parser);
 	memcpy(request_path, buf, len);
 
-	dlog(LOG_DEBUG, "REQUEST: %s\n", request_path);
-	// server.can_send = 1;
 	return 0;
 }
 
@@ -93,6 +92,7 @@ static struct sent_file_t set_response(struct connection *conn)
 		sent_file.file_type = STATIC_FILE;
 
 		char message[BUFSIZ];
+		memset(message, 0, BUFSIZ);
 
 		/* Get file size */
 		struct stat file_info;
@@ -179,23 +179,38 @@ static enum connection_state send_message(struct connection *conn)
 		goto remove_connection;
 	}
 
-	/* Analize request */
-	struct sent_file_t sent_file = set_response(conn);
+	if (!conn->headers_were_sent) {
+		bytes_sent = send(conn->sockfd, conn->send_buffer + conn->sent_bytes,
+						  conn->send_len - conn->sent_bytes, 0);
+		conn->sent_bytes += bytes_sent;
 
-	bytes_sent = send(conn->sockfd, conn->send_buffer, conn->send_len, 0);
-	if (bytes_sent < 0) {		/* error in communication */
-		dlog(LOG_ERR, "Error in communication to %s\n", abuffer);
-		goto remove_connection;
-	}
-	if (bytes_sent == 0) {		/* connection closed */
-		dlog(LOG_INFO, "Connection closed to %s\n", abuffer);
-		goto remove_connection;
+		dlog(LOG_DEBUG, "Bytes sent: %lu, total number %lu\n", conn->sent_bytes, conn->send_len);
+		if (bytes_sent < 0) {		/* error in communication */
+			dlog(LOG_ERR, "Error in communication to %s\n", abuffer);
+			goto remove_connection;
+		}
+		if (bytes_sent == 0) {		/* connection closed */
+			dlog(LOG_INFO, "Connection closed to %s\n", abuffer);
+			goto remove_connection;
+		}
+
+		dlog(LOG_DEBUG, "Sending message to %s\n", abuffer);
+		dlog(LOG_DEBUG, "Message sent: %s\n", conn->send_buffer);
+
+		if (conn->sent_bytes == conn->send_len) {
+			conn->sent_bytes = 0;
+			conn->headers_were_sent = 1;
+		}
+
+		return STATE_DATA_IS_BEING_SENT;
 	}
 
-	dlog(LOG_DEBUG, "Sending message to %s\n", abuffer);
-	dlog(LOG_DEBUG, "Message sent: %s\n", conn->send_buffer);
+
+	dlog(LOG_DEBUG, "SEND FILE, sent bytes: %lu\n", conn->sent_bytes);
 
 	/* Send file if necessary */
+	struct sent_file_t sent_file = conn->sent_file;
+
 	switch (sent_file.file_type) {
 		case NO_FILE: {
 			break;
@@ -203,13 +218,18 @@ static enum connection_state send_message(struct connection *conn)
 		case STATIC_FILE: {
 			dlog(LOG_DEBUG, "STATIC FILE\n");
 
-			conn->sent_bytes += sendfile(conn->sockfd, sent_file.fd, NULL,
-											sent_file.size - sent_file.offset);
+			conn->sent_bytes += sendfile(conn->sockfd, sent_file.fd, sent_file.offset,
+											sent_file.size - conn->sent_bytes);
+			
+			sent_file.offset = (void *)conn->sent_bytes;
+			dlog(LOG_DEBUG, "Offset: %p\nSent bytes: %lu\n", sent_file.offset, conn->sent_bytes);
 
-			if (conn->sent_bytes != sent_file.size) {
+			if (conn->sent_bytes < sent_file.size) {
 				dlog(LOG_DEBUG, "The file was not written completely\n");
+				dlog(LOG_DEBUG, "%lu bytes written\n", conn->sent_bytes);
+
 				conn->state = STATE_DATA_IS_BEING_SENT;
-				// return STATE_DATA_IS_BEING_SENT;
+				return STATE_DATA_IS_BEING_SENT;
 			}
 			dlog(LOG_DEBUG, "DONE: %lu bytes written\n", conn->sent_bytes);
 			break;
@@ -224,9 +244,9 @@ static enum connection_state send_message(struct connection *conn)
 	rc = w_epoll_update_ptr_in(server.epollfd, conn->sockfd, conn);
 	DIE(rc < 0, "w_epoll_update_ptr_in");
 
-	conn->state = STATE_DATA_SENT;
+	// conn->state = STATE_DATA_SENT;
 
-	return STATE_DATA_SENT;
+	// return STATE_DATA_SENT;
 
 remove_connection:
 	rc = w_epoll_remove_ptr(server.epollfd, conn->sockfd, conn);
@@ -250,12 +270,7 @@ static void handle_client_request(struct connection *conn)
 	ret_state = receive_message(conn);
 	if (ret_state == STATE_CONNECTION_CLOSED)
 		return;
-	
-	// if (ret_state == STATE_DATA_IS_BEING_RECEIVED) {
-	// 	rc = w_epoll_update_ptr_in(server.epollfd, conn->sockfd, conn);
-	// 	DIE(rc < 0, "w_epoll_add_ptr_in");
-	// 	return;
-	// }
+
 	ssize_t bytes_recv = conn->recv_len;
 
 	/* Set up http parser */
@@ -270,13 +285,12 @@ static void handle_client_request(struct connection *conn)
 		return;
 	}
 
+	/* Analize request and get file */
+	conn->sent_file = set_response(conn);
+
 	/* Make socket output-only */
 	rc = w_epoll_update_ptr_out(server.epollfd, conn->sockfd, conn);
 	DIE(rc < 0, "w_epoll_update_ptr_out");
-
-	// /* add socket to epoll for out events */
-	// rc = w_epoll_update_ptr_inout(server.epollfd, conn->sockfd, conn);
-	// DIE(rc < 0, "w_epoll_add_ptr_inout");
 }
 
 int main(void)

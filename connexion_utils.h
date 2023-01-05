@@ -42,6 +42,8 @@ struct connection {
 	size_t send_len;
     size_t sent_bytes;
 	enum connection_state state;
+	int headers_were_sent;
+	struct sent_file_t sent_file;
 } connexion;
 
 struct connection *connection_create(int sockfd);

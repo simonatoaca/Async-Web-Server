@@ -25,6 +25,7 @@ struct connection *connection_create(int sockfd)
 	conn->send_len = 0;
 	conn->sent_bytes = 0;
 	conn->received_bytes = 0;
+	conn->headers_were_sent = 0;
 
 	return conn;
 }
