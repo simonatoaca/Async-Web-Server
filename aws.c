@@ -24,6 +24,10 @@ static char http_version[HTTP_VERSION_LEN];
 static int on_path_cb(http_parser *p, const char *buf, size_t len)
 {
 	assert(p == &server.request_parser);
+	
+	/* Clear request path bufferr */
+	memset(request_path, 0, BUFSIZ);
+
 	memcpy(request_path, buf, len);
 
 	return 0;
@@ -142,8 +146,6 @@ static enum connection_state receive_message(struct connection *conn)
 
 	conn->recv_len += bytes_recv;
 
-	dlog(LOG_DEBUG, "Received message: %s\n", conn->recv_buffer);
-
 	conn->state = STATE_DATA_RECEIVED;
 
 	return STATE_DATA_RECEIVED;
@@ -171,8 +173,6 @@ static void send_dynamic(struct connection *conn, struct sent_file_t *sent_file)
 		ERR("io_setup");
 		return;
 	}
-
-	dlog(LOG_DEBUG, "io setup done\n");
 
 	/* Buffer */
 	char buffer[BUFSIZ];
@@ -252,18 +252,15 @@ static enum connection_state send_message(struct connection *conn)
 
 	dlog(LOG_DEBUG, "HEADERS sent: %s\n", conn->send_buffer);
 
-	dlog(LOG_DEBUG, "SEND FILE, sent bytes: %lu\n", conn->sent_bytes);
-
 	/* Send file if necessary */
 	struct sent_file_t sent_file = conn->sent_file;
+	dlog(LOG_DEBUG, "SEND FILE %d\n", sent_file.fd);
 
 	switch (sent_file.file_type) {
 		case NO_FILE: {
 			break;
 		}
 		case STATIC_FILE: {
-			dlog(LOG_DEBUG, "STATIC FILE\n");
-
 			conn->sent_bytes += sendfile(conn->sockfd, sent_file.fd, sent_file.offset,
 											sent_file.size - conn->sent_bytes);
 			
@@ -276,7 +273,6 @@ static enum connection_state send_message(struct connection *conn)
 			break;
 		}
 		case DYNAMIC_FILE: {
-			dlog(LOG_DEBUG, "DYNAMIC FILE\n");
 			send_dynamic(conn, &sent_file);
 			break;
 		}
@@ -327,12 +323,16 @@ static void handle_client_request(struct connection *conn)
 		return;
 	}
 
+	dlog(LOG_DEBUG, "Received message: %s\n", conn->recv_buffer);
+
 	/* Analize request and get file */
 	conn->sent_file = set_response(conn);
 
 	/* Make socket output-only */
 	rc = w_epoll_update_ptr_out(server.epollfd, conn->sockfd, conn);
 	DIE(rc < 0, "w_epoll_update_ptr_out");
+
+	server.can_send = 0;
 }
 
 int main(void)
@@ -374,11 +374,11 @@ int main(void)
 				handle_new_connection();
 		} else {
 			if (rev.events & EPOLLIN) {
-				dlog(LOG_DEBUG, "New message\n");
+				// dlog(LOG_DEBUG, "New message\n");
 				handle_client_request(rev.data.ptr);
 			}
 			if (rev.events & EPOLLOUT) {
-				dlog(LOG_DEBUG, "Ready to send message\n");
+				// dlog(LOG_DEBUG, "Ready to send message\n");
 				send_message(rev.data.ptr);
 			}
 		}
