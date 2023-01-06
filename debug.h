@@ -40,7 +40,7 @@ enum {
  */
 
 #ifndef LOG_LEVEL
-#define LOG_LEVEL	LOG_WARNING
+#define LOG_LEVEL	LOG_DEBUG
 #endif
 
 /*

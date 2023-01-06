@@ -58,6 +58,8 @@ extern "C" {
 
 #define CRLF "\r\n"
 
+#define IO_OPS 2
+
 enum file_type_t {
     NO_FILE,
     STATIC_FILE,
@@ -77,19 +79,5 @@ typedef struct server_t {
 	http_parser request_parser;
 	int can_send;
 } server_t;
-
-#define IOCB_PREAD(fd, buffer, bufsiz) { \
-  .aio_fildes = fd, \
-  .aio_lio_opcode = IO_CMD_PREAD, \
-  .u.c.buf = &buffer[0], \
-  .u.c.nbytes = bufsiz, \
-}
-
-#define IOCB_PWRITE(fd, buffer) { \
-  .aio_fildes = fd, \
-  .aio_lio_opcode = IO_CMD_PWRITE, \
-  .u.c.buf = &buffer[0], \
-  .u.c.nbytes = 0, \
-}
 
 #endif /* AWS_H_ */

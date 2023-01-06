@@ -36,7 +36,6 @@ static int on_path_cb(http_parser *p, const char *buf, size_t len)
 static int on_headers_complete_cb(http_parser *p)
 {
 	assert(p == &server.request_parser);
-	dlog(LOG_DEBUG, "SERVER CAN SEND TO: %s\n", request_path);
 	server.can_send = 1;
 
 	return 0;
@@ -44,6 +43,10 @@ static int on_headers_complete_cb(http_parser *p)
 
 static http_parser_settings settings_on_path = HTTP_SETTINGS_INIT()
 
+/*
+ * Check if the requested path exists.
+ * @return the fd of the file if it exists, -1 otherwise
+ */
 static int check_path(char *request_path) {
 	/* Check to see if the path is valid */
 	if (!strcmp(request_path, "/") || !strlen(request_path)) {
@@ -61,8 +64,8 @@ static int check_path(char *request_path) {
 }
 
 /*
- * Copy the http response into the send buffer
- * and return the file that should be handled (if it exists)
+ * Copy the http response into the send buffer.
+ * @return the file that should be handled (if it exists)
  */
 static struct sent_file_t set_response(struct connection *conn)
 {
@@ -128,12 +131,8 @@ static enum connection_state receive_message(struct connection *conn)
 		ERR("get_peer_address");
 		goto remove_connection;
 	}
-
-	char buffer[BUFSIZ];
 	
-	bytes_recv = recv(conn->sockfd, buffer, BUFSIZ, 0);
-	
-	strncat(conn->recv_buffer, buffer, bytes_recv);
+	bytes_recv = recv(conn->sockfd, conn->recv_buffer + conn->recv_len, BUFSIZ, 0);
 
 	if (bytes_recv < 0) {		/* error in communication */
 		dlog(LOG_ERR, "Error in communication from: %s\n", abuffer);
@@ -160,16 +159,17 @@ remove_connection:
 	return STATE_CONNECTION_CLOSED;
 }
 
-
+/*
+ *	Send file to socket using libaio async I/O
+ */
 static void send_dynamic(struct connection *conn, struct sent_file_t *sent_file) {
 	int senderfd = sent_file->fd;
 	int receiverfd = conn->sockfd;
 
 	/* Set context */
 	io_context_t ctx = {0};
-	int errno;
-	if ((errno = io_setup(2, &ctx)) < 0) {
-		dlog(LOG_DEBUG, "errno %d\n", errno);
+
+	if (io_setup(2, &ctx) < 0) {
 		ERR("io_setup");
 		return;
 	}
@@ -178,10 +178,6 @@ static void send_dynamic(struct connection *conn, struct sent_file_t *sent_file)
 	char buffer[BUFSIZ];
 
 	/* Define I/O operations */
-	// struct iocb iocb_list[2] = {
-	// 	IOCB_PWRITE(receiverfd, buffer),
-	// 	IOCB_PREAD(senderfd, buffer, BUFSIZ)
-	// };
  	struct iocb iocb_list[2];
 	io_prep_pwrite(&iocb_list[0], receiverfd, buffer, 0, 0);
 	io_prep_pread(&iocb_list[1], senderfd, buffer, BUFSIZ, 0);
@@ -192,23 +188,26 @@ static void send_dynamic(struct connection *conn, struct sent_file_t *sent_file)
 
 	int result = 0;
 	while (conn->sent_bytes <= sent_file->size) {
-		result = io_submit(ctx, 2, piocb);
+		result = io_submit(ctx, IO_OPS, piocb);
 
-		result = io_getevents(ctx, 2, 2, events, NULL);
+		result = io_getevents(ctx, IO_OPS, IO_OPS, events, NULL);
 
-		/* Write will write the number bytes read has read */
+		if (result < IO_OPS) {
+			ERR("io_getevents");
+			return;
+		}
+
+		/* Stop when there is nothing to be read from the file */
 		if (events[1].res == 0) {
-			dlog(LOG_DEBUG, "Read is done, bytes read - file size: %lu\n", sent_file->size - conn->sent_bytes);	
 			break;
 		}
+
 		io_prep_pwrite(&iocb_list[0], receiverfd, &buffer, events[1].res, 0);
-		//iocb_list[1].u.c.nbytes = events[1].res;
 		conn->sent_bytes += events[1].res;
 
 		/* Update offset */
 		io_prep_pread(&iocb_list[1], senderfd, &buffer, BUFSIZ, conn->sent_bytes);
 	}
-	dlog(LOG_DEBUG, "File %d read\n", sent_file->fd);
 }
 
 /*
@@ -228,6 +227,7 @@ static enum connection_state send_message(struct connection *conn)
 		goto remove_connection;
 	}
 
+	/* Send headers */
 	if (!conn->headers_were_sent) {
 		bytes_sent = send(conn->sockfd, conn->send_buffer + conn->sent_bytes,
 						  conn->send_len - conn->sent_bytes, 0);
@@ -250,11 +250,8 @@ static enum connection_state send_message(struct connection *conn)
 		return STATE_DATA_IS_BEING_SENT;
 	}
 
-	dlog(LOG_DEBUG, "HEADERS sent: %s\n", conn->send_buffer);
-
 	/* Send file if necessary */
 	struct sent_file_t sent_file = conn->sent_file;
-	dlog(LOG_DEBUG, "SEND FILE %d\n", sent_file.fd);
 
 	switch (sent_file.file_type) {
 		case NO_FILE: {
@@ -374,11 +371,11 @@ int main(void)
 				handle_new_connection();
 		} else {
 			if (rev.events & EPOLLIN) {
-				// dlog(LOG_DEBUG, "New message\n");
+				dlog(LOG_DEBUG, "New message\n");
 				handle_client_request(rev.data.ptr);
 			}
 			if (rev.events & EPOLLOUT) {
-				// dlog(LOG_DEBUG, "Ready to send message\n");
+				dlog(LOG_DEBUG, "Ready to send message\n");
 				send_message(rev.data.ptr);
 			}
 		}
