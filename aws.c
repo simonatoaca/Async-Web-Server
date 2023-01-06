@@ -78,18 +78,17 @@ static struct sent_file_t set_response(struct connection *conn)
 	char initial_line[INITIAL_LINE_LEN];
 	
 	if (response < 0) {
-		sprintf(initial_line, "%s %s\r\n\r\n", http_version, NOT_FOUND);
+		sprintf(initial_line, "%s %s" CRLF CRLF, http_version, NOT_FOUND);
 		conn->send_len = strlen(initial_line);
 		memcpy(conn->send_buffer, initial_line, strlen(initial_line));
 	} else {
-		sprintf(initial_line, "%s %s\r\n", http_version, OK);
+		sprintf(initial_line, "%s %s" CRLF, http_version, OK);
 		conn->send_len = strlen(initial_line);
 		memcpy(conn->send_buffer, initial_line, strlen(initial_line));
 
 		/* Get file type: static/dynamic */
-		// sent_file.file_type = strstr(request_path, AWS_REL_STATIC_FOLDER) ? 
-		// 						STATIC_FILE : DYNAMIC_FILE;
-		sent_file.file_type = STATIC_FILE;
+		sent_file.file_type = strstr(request_path, AWS_REL_STATIC_FOLDER) ? 
+								STATIC_FILE : DYNAMIC_FILE;
 
 		char message[BUFSIZ];
 		memset(message, 0, BUFSIZ);
@@ -99,15 +98,12 @@ static struct sent_file_t set_response(struct connection *conn)
 		fstat(sent_file.fd, &file_info);
 		sent_file.size = file_info.st_size;
 
-		/* Put header */
-		sprintf(message, "%sContent-Length: %lu\r\n"
-						 "Connection: close\r\n\r\n", initial_line, sent_file.size);
+		/* Put headers */
+		sprintf(message, "%sContent-Length: %lu" CRLF
+						 "Connection: close" CRLF CRLF, initial_line, sent_file.size);
 		conn->send_len = strlen(message);
-		memcpy(conn->send_buffer, message, strlen(message));
+		memcpy(conn->send_buffer, message, conn->send_len);
 	}
-
-	/* Clear request path */
-	// memset(request_path, 0, BUFSIZ);
 
 	return sent_file;
 }
@@ -162,9 +158,62 @@ remove_connection:
 	return STATE_CONNECTION_CLOSED;
 }
 
+
+static void send_dynamic(struct connection *conn, struct sent_file_t *sent_file) {
+	int senderfd = sent_file->fd;
+	int receiverfd = conn->sockfd;
+
+	/* Set context */
+	io_context_t ctx = {0};
+	int errno;
+	if ((errno = io_setup(2, &ctx)) < 0) {
+		dlog(LOG_DEBUG, "errno %d\n", errno);
+		ERR("io_setup");
+		return;
+	}
+
+	dlog(LOG_DEBUG, "io setup done\n");
+
+	/* Buffer */
+	char buffer[BUFSIZ];
+
+	/* Define I/O operations */
+	// struct iocb iocb_list[2] = {
+	// 	IOCB_PWRITE(receiverfd, buffer),
+	// 	IOCB_PREAD(senderfd, buffer, BUFSIZ)
+	// };
+ 	struct iocb iocb_list[2];
+	io_prep_pwrite(&iocb_list[0], receiverfd, buffer, 0, 0);
+	io_prep_pread(&iocb_list[1], senderfd, buffer, BUFSIZ, 0);
+
+
+	struct iocb *piocb[2] = {&iocb_list[0], &iocb_list[1]};
+	struct io_event events[2];
+
+	int result = 0;
+	while (conn->sent_bytes <= sent_file->size) {
+		result = io_submit(ctx, 2, piocb);
+
+		result = io_getevents(ctx, 2, 2, events, NULL);
+
+		/* Write will write the number bytes read has read */
+		if (events[1].res == 0) {
+			dlog(LOG_DEBUG, "Read is done, bytes read - file size: %lu\n", sent_file->size - conn->sent_bytes);	
+			break;
+		}
+		io_prep_pwrite(&iocb_list[0], receiverfd, &buffer, events[1].res, 0);
+		//iocb_list[1].u.c.nbytes = events[1].res;
+		conn->sent_bytes += events[1].res;
+
+		/* Update offset */
+		io_prep_pread(&iocb_list[1], senderfd, &buffer, BUFSIZ, conn->sent_bytes);
+	}
+	dlog(LOG_DEBUG, "File %d read\n", sent_file->fd);
+}
+
 /*
  * Send message on socket.
- * Store message in send_buffer in struct connection.
+ * Message headers are stored in send_buffer in struct connection.
  */
 
 static enum connection_state send_message(struct connection *conn)
@@ -184,7 +233,6 @@ static enum connection_state send_message(struct connection *conn)
 						  conn->send_len - conn->sent_bytes, 0);
 		conn->sent_bytes += bytes_sent;
 
-		dlog(LOG_DEBUG, "Bytes sent: %lu, total number %lu\n", conn->sent_bytes, conn->send_len);
 		if (bytes_sent < 0) {		/* error in communication */
 			dlog(LOG_ERR, "Error in communication to %s\n", abuffer);
 			goto remove_connection;
@@ -194,9 +242,6 @@ static enum connection_state send_message(struct connection *conn)
 			goto remove_connection;
 		}
 
-		dlog(LOG_DEBUG, "Sending message to %s\n", abuffer);
-		dlog(LOG_DEBUG, "Message sent: %s\n", conn->send_buffer);
-
 		if (conn->sent_bytes == conn->send_len) {
 			conn->sent_bytes = 0;
 			conn->headers_were_sent = 1;
@@ -205,6 +250,7 @@ static enum connection_state send_message(struct connection *conn)
 		return STATE_DATA_IS_BEING_SENT;
 	}
 
+	dlog(LOG_DEBUG, "HEADERS sent: %s\n", conn->send_buffer);
 
 	dlog(LOG_DEBUG, "SEND FILE, sent bytes: %lu\n", conn->sent_bytes);
 
@@ -224,17 +270,14 @@ static enum connection_state send_message(struct connection *conn)
 			sent_file.offset = (void *)conn->sent_bytes;
 
 			if (conn->sent_bytes < sent_file.size) {
-				dlog(LOG_DEBUG, "The file was not written completely\n");
-				dlog(LOG_DEBUG, "%lu bytes written\n", conn->sent_bytes);
-
 				conn->state = STATE_DATA_IS_BEING_SENT;
 				return STATE_DATA_IS_BEING_SENT;
 			}
-			dlog(LOG_DEBUG, "DONE: %lu bytes written\n", conn->sent_bytes);
 			break;
 		}
 		case DYNAMIC_FILE: {
-			printf("Dynamic file\n");
+			dlog(LOG_DEBUG, "DYNAMIC FILE\n");
+			send_dynamic(conn, &sent_file);
 			break;
 		}
 	}
@@ -246,8 +289,6 @@ static enum connection_state send_message(struct connection *conn)
 	conn->state = STATE_DATA_SENT;
 
 	close(sent_file.fd);
-
-	// return STATE_DATA_SENT;
 
 remove_connection:
 	rc = w_epoll_remove_ptr(server.epollfd, conn->sockfd, conn);
