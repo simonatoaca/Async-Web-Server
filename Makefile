@@ -2,5 +2,8 @@ CC=gcc
 CFLAGS=-Wall -Wextra -g
 LDFLAGS=-laio
 
-aws: aws.c lin/sock_util.c http-parser/http_parser.c connexion_utils.c
+aws: aws.c sock_util.c http_parser.c
 	$(CC) $(CFLAGS) $^ $(LDFLAGS) -o $@
+
+clean:
+	rm aws
